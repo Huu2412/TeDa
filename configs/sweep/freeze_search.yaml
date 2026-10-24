@@ -1,0 +1,15 @@
+# Search for the best frozen part of ViP-VL (12 blocks, indices 0..11), run on the E00 baseline
+# (CTC only) so the cost is paid once; the winner is then fixed for E01-E04.
+# Pick by VALID WER only. Edit freely: each run = one set of overrides.
+base_exp: e00_baseline
+out_dir: outputs/sweep_freeze
+common_set:                 # applied to every run (shorter than the final schedule)
+  train.epochs: 10
+runs:
+  - {name: free,        set: {encoder.freeze_embed: false, encoder.freeze_layers: [], encoder.freeze_after_norm: false}}
+  - {name: embed,       set: {encoder.freeze_embed: true,  encoder.freeze_layers: [], encoder.freeze_after_norm: false}}
+  - {name: embed_low3,  set: {encoder.freeze_embed: true,  encoder.freeze_layers: [0, 1, 2], encoder.freeze_after_norm: false}}
+  - {name: embed_low6,  set: {encoder.freeze_embed: true,  encoder.freeze_layers: [0, 1, 2, 3, 4, 5], encoder.freeze_after_norm: false}}
+  - {name: embed_low9,  set: {encoder.freeze_embed: true,  encoder.freeze_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8], encoder.freeze_after_norm: false}}
+  - {name: all_frozen,  set: {encoder.freeze_embed: true,  encoder.freeze_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], encoder.freeze_after_norm: true}}   # lower bound: only the CTC head learns
+  - {name: high6,       set: {encoder.freeze_embed: false, encoder.freeze_layers: [6, 7, 8, 9, 10, 11], encoder.freeze_after_norm: false}}                  # contrast: freeze the TOP half

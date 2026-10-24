@@ -1,0 +1,8 @@
+# Same as pyproject.toml. torch / torchaudio (>= 2.5) are preinstalled on Kaggle; install them yourself elsewhere.
+numpy
+soundfile
+pyarrow
+pyyaml
+huggingface_hub
+sentencepiece
+pytest

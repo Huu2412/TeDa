@@ -1,0 +1,18 @@
+# Style knobs for the Vietnamese text normaliser (src/teda/data/text_norm.py).
+# Vietnamese has several valid ways to read numbers; scan_text.py prints how the
+# corpus itself writes them (letter-form numbers), so choose values from that.
+
+number_style:
+  linh: linh                 # 105 -> "một trăm linh năm"   (alt: lẻ)
+  thousand: nghìn            # alt: ngàn
+  billion: tỷ                # alt: tỉ
+  four_after_tens: bốn       # 24 -> "hai mươi bốn"          (alt: tư)
+  one_after_tens: mốt        # 21 -> "hai mươi mốt"          (alt: một)
+  five_after_tens: lăm       # 25 -> "hai mươi lăm"          (alt: năm)
+
+# Position of the tone mark in open syllables oa/oe/uy:
+#   old: hòa, khỏe, thúy      new: hoà, khoẻ, thuý
+tone_style: old
+
+# Optional "raw<TAB>spoken" mapping for acronyms (see configs/abbreviations.tsv).
+abbreviations_file: configs/abbreviations.tsv

@@ -1,0 +1,84 @@
+# TeDA base config. Experiment files in configs/exp/ override only what differs;
+# any value can also be overridden on the command line:  --set train.epochs=5 encoder.freeze_layers=[0,1,2]
+
+exp_name: base
+
+data:
+  hf_repo: nguyendv02/ViMD_Dataset
+  splits: [train, valid, test]
+  sample_rate: 16000
+  # Output of scripts/prepare_data.py + scripts/scan_text.py (relative path or absolute Kaggle path)
+  data_dir: data/vimd16k
+  manifest: manifest.tsv            # inside data_dir; wav paths in it are relative to data_dir
+  text_norm_config: configs/text_norm.yaml
+  regions: [North, Central, South]  # accent labels (3 regions only)
+  text_field: text_norm             # CTC targets / WER reference
+  tokenizer_model: artifacts/tokenizer/bpe1024.model   # built by scripts/build_tokenizer.py (commit it)
+  vocab_size: 1024                  # id 0 = <blank>, id 1 = <unk>
+  limit: null                       # debug only: first N utterances of each split
+
+features:                           # same fbank as the ViP-VL pipeline
+  num_mel_bins: 80
+  dither_train: 1.0
+  dither_eval: 0.0
+  spec_aug: {enabled: true, num_t_mask: 2, num_f_mask: 2, max_t: 50, max_f: 10}
+  speed_perturb: []                 # e.g. [0.9, 1.0, 1.1]; empty = off
+
+encoder:
+  bundle: khanhld/vip-vl-base-vie   # HF repo id or local folder (pytorch_model.pt, config.yaml, global_cmvn)
+  fallback_config: configs/vipvl_encoder.yaml   # used only if the bundle has no config.yaml
+  pretrained: true
+  min_match: 0.95                   # refuse to train if fewer encoder tensors than this fraction load
+  overrides:                        # merged into the bundle's encoder_conf
+    encoder_layerdrop: 0.0          # LayerDrop leaves params unused in a step, which breaks DDP unless
+                                    # train.ddp_find_unused=true (slower). Keep 0 unless you need it.
+    dropout_rate: 0.1
+    positional_dropout_rate: 0.1
+    attention_dropout_rate: 0.1
+    # dynamic chunk training (ChunkFormer recipe): a random (chunk, left, right) context per step
+    dynamic_chunk_sizes: [-1, -1, 64, 128, 256]       # -1 = full context
+    dynamic_left_context_sizes: [64, 128, 256]
+    dynamic_right_context_sizes: [64, 128, 256]
+  # partial freezing: THE hyper-parameter to search (see configs/sweep/freeze_search.yaml)
+  freeze_embed: true                # subsampling front-end
+  freeze_layers: [0, 1, 2, 3]       # indices 0..11 of the 12 conformer blocks (any subset)
+  freeze_after_norm: false
+
+model:
+  ctc_dropout: 0.1
+
+train:
+  seed: 1234
+  epochs: 30
+  # Batches are packed by PADDED feature frames per GPU (100 frames = 1 s). Starting values for a T4 (15 GB),
+  # NOT yet measured: run scripts/probe_memory.py on Kaggle and adjust.
+  max_frames_per_batch: 24000
+  max_batch_size: null
+  accum_grad: 2
+  num_workers: 2                    # CPU workers computing fbank; Kaggle has few cores
+  pin_memory: false                 # false prevents unbounded caching host allocator RAM leak on dynamic audio batching
+  amp: fp16                         # T4 has no bf16
+  grad_clip: 5.0
+  lr_encoder: 1.0e-4                # untuned starting points
+  lr_head: 1.0e-3
+  weight_decay: 0.01
+  warmup_steps: 500
+  min_lr_ratio: 0.05
+  max_dur: 35.0                     # seconds; longer TRAIN utterances are skipped (valid/test never filtered)
+  drop_infeasible_ctc: true         # TRAIN only: skip utterances with more tokens than encoder frames
+  ddp_find_unused: false
+  eval_every_epochs: 1
+  log_every: 50
+  save_every_steps: 500
+  max_hours: 11.0                   # stop cleanly (saving last.pt) this long after THIS run started; re-run to resume
+  time_check_every: 20              # optimizer steps between time-limit checks
+  force: false                      # true = train again even if outputs/<exp>/done.json exists
+
+eval:
+  batch_frames: 20000
+  pin_memory: false
+  chunk: null                       # null = full context; or [64, 128, 128] for chunked decoding
+  bootstrap_in_training: false      # true = also compute the (slow) bootstrap CI at every validation
+
+paths:
+  out_root: outputs

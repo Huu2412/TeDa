@@ -1,0 +1,7 @@
+# One mapping per line:  RAW<TAB>SPOKEN FORM   (RAW is case-sensitive)
+# Lines starting with '#' are ignored.
+#
+# This file is intentionally empty. Run scripts/scan_text.py first: it writes
+# unresolved.tsv listing every acronym found in ViMD with its frequency.
+# Fill in only the entries you have verified are read that way, e.g.
+#   UBND<TAB>ủy ban nhân dân

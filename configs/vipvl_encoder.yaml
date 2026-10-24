@@ -1,0 +1,22 @@
+# Fallback ViP-VL base architecture, copied from the pretraining recipe of khanld/chunkformer
+# (examples/ssl/vipvl/conf/vipvl.yaml). The bundle's own config.yaml takes precedence.
+encoder: chunkformer
+encoder_conf:
+  output_size: 512
+  attention_heads: 8
+  linear_units: 2048
+  num_blocks: 12
+  dropout_rate: 0.1
+  encoder_layerdrop: 0.05
+  positional_dropout_rate: 0.1
+  attention_dropout_rate: 0.1
+  input_layer: dw_striding
+  normalize_before: true
+  cnn_module_kernel: 15
+  use_cnn_module: true
+  activation_type: swish
+  pos_enc_layer_type: chunk_rel_pos
+  selfattention_layer_type: chunk_rel_seflattn
+  cnn_module_norm: layer_norm
+  dynamic_conv: true
+input_dim: 80

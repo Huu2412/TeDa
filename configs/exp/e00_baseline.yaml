@@ -1,0 +1,2 @@
+# E00: ViP-VL encoder + CTC head only (no accent head, no alignment loss).
+exp_name: e00_baseline
