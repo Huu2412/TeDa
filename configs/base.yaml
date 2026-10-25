@@ -46,6 +46,11 @@ encoder:
 
 model:
   ctc_dropout: 0.1
+  accent:
+    enabled: false
+    num_classes: 3           # North (0), Central (1), South (2)
+    weight: 0.0              # lambda_accent (0.0 = disabled)
+    dropout: 0.1
 
 train:
   seed: 1234
