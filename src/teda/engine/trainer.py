@@ -196,6 +196,7 @@ class Trainer:
         t0 = time.time()
         self.raw.train()
         win_loss, win_n, win_gn, nonfinite = 0.0, 0, 0.0, 0
+        win_acc_loss, win_acc_acc = 0.0, 0.0
         log_every = int(self.tc.get("log_every", 50))
         save_every = int(self.tc.get("save_every_steps", 500))
         status = "done"
@@ -212,7 +213,7 @@ class Trainer:
                 accum_n += 1
                 last_micro = self.micro_in_epoch >= n_micro
                 boundary = accum_n == self.accum or last_micro
-                inputs = to_device({k: batch[k] for k in ("feats", "feat_lens", "tokens", "token_lens")}, self.ctx.device)
+                inputs = to_device({k: batch[k] for k in ("feats", "feat_lens", "tokens", "token_lens", "region_ids") if k in batch}, self.ctx.device)
 
                 sync = self.ddp.no_sync() if (self.ctx.distributed and not boundary) else contextlib.nullcontext()
                 with sync:
@@ -223,6 +224,9 @@ class Trainer:
                         nonfinite += 1
                     self.scaler.scale(loss / self.accum).backward()
                 win_loss += float(out["loss_ctc"])
+                if "loss_accent" in out:
+                    win_acc_loss += float(out["loss_accent"])
+                    win_acc_acc += float(out["accent_acc"])
                 win_n += 1
                 if not boundary:
                     continue
@@ -242,13 +246,19 @@ class Trainer:
                     gpu_gib = torch.cuda.max_memory_allocated() / 2**30 if self.ctx.device.type == "cuda" else 0.0
                     host_gib = _host_ram_gib()
                     sys_gib = _sys_ram_gib()
-                    log.info("ep %d step %d/%d | ctc %.3f | lr %.2e | gnorm %.2f | gpu %.1f GiB | host %.1f GiB | sys %.1f GiB | nonfinite %d | %.0f min",
-                             epoch, self.step, self.total_steps, avg, self.sched.get_last_lr()[0], win_gn / log_every,
+                    acc_str = f" | acc_loss {win_acc_loss/win_n:.3f} acc {100*win_acc_acc/win_n:.1f}%" if win_acc_loss > 0 else ""
+                    log.info("ep %d step %d/%d | ctc %.3f%s | lr %.2e | gnorm %.2f | gpu %.1f GiB | host %.1f GiB | sys %.1f GiB | nonfinite %d | %.0f min",
+                             epoch, self.step, self.total_steps, avg, acc_str, self.sched.get_last_lr()[0], win_gn / log_every,
                              gpu_gib, host_gib, sys_gib, nonfinite, (time.time() - t0) / 60)
+                    metrics_kwargs = {}
+                    if win_acc_loss > 0:
+                        metrics_kwargs["loss_accent"] = win_acc_loss / win_n
+                        metrics_kwargs["accent_acc"] = win_acc_acc / win_n
                     self.metrics.write(kind="train", step=self.step, epoch=epoch, loss_ctc=avg,
                                        lr=self.sched.get_last_lr()[0], grad_norm=win_gn / log_every,
-                                       peak_gpu_gib=gpu_gib, host_gib=host_gib, sys_gib=sys_gib)
+                                       peak_gpu_gib=gpu_gib, host_gib=host_gib, sys_gib=sys_gib, **metrics_kwargs)
                     win_loss, win_n, win_gn = 0.0, 0, 0.0
+                    win_acc_loss, win_acc_acc = 0.0, 0.0
                     _malloc_trim()
                 sys_gib = _sys_ram_gib()
                 if (self.max_host_gib and _host_ram_gib() > self.max_host_gib) or (sys_gib > 27.0):

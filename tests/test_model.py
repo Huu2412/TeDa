@@ -114,3 +114,38 @@ def test_ctc_greedy_collapses_repeats_and_blanks():
         logits[0, t, k] = 5.0
     assert ctc_greedy(logits, torch.tensor([len(path)])) == [[1, 1, 2, 3]]
     assert ctc_greedy(logits, torch.tensor([3])) == [[1]]  # respects the length
+
+
+def test_accent_head_forward_and_loss():
+    from teda.models.heads.accent_head import AccentHead
+
+    head = AccentHead(dim=16, num_classes=3, dropout=0.0)
+    enc = torch.randn(4, 20, 16)
+    lens = torch.tensor([20, 15, 10, 5])
+    labels = torch.tensor([0, 1, 2, 0])
+
+    logits = head.logits(enc, lens)
+    assert logits.shape == (4, 3)
+
+    loss, acc = head.loss_and_acc(enc, lens, labels)
+    assert torch.isfinite(loss)
+    assert 0.0 <= float(acc) <= 1.0
+
+
+def test_teda_model_with_accent_head():
+    cfg = tiny_cfg()
+    cfg.model = {"ctc_dropout": 0.1, "accent": {"enabled": True, "weight": 0.5, "num_classes": 3}}
+    model, rep = build_model(cfg, vocab_size=40)
+    assert model.accent is not None and model.weight_accent == 0.5
+
+    batch = _batch()
+    batch["region_ids"] = torch.tensor([0, 2])
+
+    out = model(batch)
+    assert "loss" in out and "loss_ctc" in out and "loss_accent" in out and "accent_acc" in out
+    assert torch.isclose(out["loss"], out["loss_ctc"] + 0.5 * out["loss_accent"])
+
+    out["loss"].backward()
+    trainable_accent = [p for p in model.accent.parameters() if p.requires_grad]
+    assert all(p.grad is not None for p in trainable_accent)
+

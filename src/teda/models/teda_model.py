@@ -12,6 +12,7 @@ from torch import nn
 from teda.models.encoder import (
     SpeechEncoder, build_chunkformer, load_pretrained, read_bundle_config, resolve_bundle,
 )
+from teda.models.heads.accent_head import AccentHead
 from teda.models.heads.ctc_head import CTCHead
 from teda.utils.freeze import apply_freeze, format_freeze_report, freeze_report
 
@@ -19,10 +20,19 @@ log = logging.getLogger("teda")
 
 
 class TedaModel(nn.Module):
-    def __init__(self, encoder: SpeechEncoder, ctc: CTCHead, frozen_modules: Sequence[nn.Module] = ()):
+    def __init__(
+        self,
+        encoder: SpeechEncoder,
+        ctc: CTCHead,
+        frozen_modules: Sequence[nn.Module] = (),
+        accent: Optional[AccentHead] = None,
+        weight_accent: float = 0.0,
+    ):
         super().__init__()
         self.encoder = encoder
         self.ctc = ctc
+        self.accent = accent
+        self.weight_accent = float(weight_accent)
         self._frozen = list(frozen_modules)  # plain list on purpose: these are already registered via encoder
 
     def train(self, mode: bool = True):
@@ -34,7 +44,13 @@ class TedaModel(nn.Module):
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         enc, lens = self.encoder(batch["feats"], batch["feat_lens"])
         loss_ctc = self.ctc.loss(enc, lens, batch["tokens"], batch["token_lens"])
-        return {"loss": loss_ctc, "loss_ctc": loss_ctc.detach()}
+        out = {"loss": loss_ctc, "loss_ctc": loss_ctc.detach()}
+        if self.accent is not None and self.weight_accent > 0 and "region_ids" in batch:
+            loss_acc, acc_acc = self.accent.loss_and_acc(enc, lens, batch["region_ids"])
+            out["loss"] = out["loss"] + self.weight_accent * loss_acc
+            out["loss_accent"] = loss_acc.detach()
+            out["accent_acc"] = acc_acc.detach()
+        return out
 
     @torch.no_grad()
     def encode_logits(self, feats: torch.Tensor, feat_lens: torch.Tensor, chunk: Optional[Sequence[int]] = None):
@@ -70,7 +86,19 @@ def build_model(cfg, vocab_size: int, blank_id: int = 0) -> Tuple[TedaModel, Dic
     frozen = apply_freeze(net, bool(ec.get("freeze_embed", False)), ec.get("freeze_layers") or [], bool(ec.get("freeze_after_norm", False)))
     encoder = SpeechEncoder(net)
     ctc = CTCHead(encoder.output_size, vocab_size, blank_id, float(cfg.get("model", {}).get("ctc_dropout", 0.0)))
-    model = TedaModel(encoder, ctc, frozen)
+
+    accent_cfg = cfg.get("model", {}).get("accent") or {}
+    accent = None
+    weight_accent = float(accent_cfg.get("weight", 0.0))
+    if accent_cfg.get("enabled", False) or weight_accent > 0:
+        num_classes = int(accent_cfg.get("num_classes", len(cfg.get("data", {}).get("regions", ["North", "Central", "South"]))))
+        dropout = float(accent_cfg.get("dropout", 0.1))
+        accent = AccentHead(encoder.output_size, num_classes=num_classes, dropout=dropout)
+        if weight_accent <= 0:
+            weight_accent = 0.2  # default weight
+        log.info("accent head enabled: num_classes=%d, weight=%.2f, dropout=%.2f", num_classes, weight_accent, dropout)
+
+    model = TedaModel(encoder, ctc, frozen, accent=accent, weight_accent=weight_accent)
     rep = freeze_report(model, net)
     log.info("parameters (trainable / frozen):\n%s", format_freeze_report(rep))
     return model, rep

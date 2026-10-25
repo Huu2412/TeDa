@@ -1,0 +1,25 @@
+# E01_FULL_ACCENT: ViP-VL encoder fully unfrozen + CTC head + 3-region Accent Head.
+exp_name: e01_full_accent
+
+encoder:
+  freeze_embed: false        # unfreeze subsampling front-end
+  freeze_layers: []          # unfreeze ALL 12 conformer blocks
+  freeze_after_norm: false
+
+model:
+  ctc_dropout: 0.1
+  accent:
+    enabled: true
+    num_classes: 3           # North (0), Central (1), South (2)
+    weight: 0.2              # loss = loss_ctc + weight * loss_accent
+    dropout: 0.1
+
+train:
+  max_frames_per_batch: 18000   # fits comfortably in T4 15GB VRAM
+  accum_grad: 3                 # effective batch ~ 18000*2*3 = 108000 frames (~18 mins audio)
+  num_workers: 1                # 1 worker per GPU saves ~4 GB host RAM vs default 2
+  lr_encoder: 5.0e-5            # smaller LR for pretrained weights
+  lr_head: 1.0e-3
+  warmup_steps: 1000
+  pad_multiple: 128             # limits cuDNN plan-cache RAM growth
+  max_host_gib: 22              # save & exit cleanly before SIGKILL; re-run to resume

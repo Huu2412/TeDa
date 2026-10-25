@@ -1,0 +1,16 @@
+# E01_ACCENT: ViP-VL encoder (4 blocks frozen) + CTC head + 3-region Accent Head.
+exp_name: e01_accent
+
+model:
+  ctc_dropout: 0.1
+  accent:
+    enabled: true
+    num_classes: 3           # North (0), Central (1), South (2)
+    weight: 0.2              # loss = loss_ctc + weight * loss_accent
+    dropout: 0.1
+
+train:
+  max_frames_per_batch: 24000
+  accum_grad: 2
+  pad_multiple: 128
+  max_host_gib: 22
