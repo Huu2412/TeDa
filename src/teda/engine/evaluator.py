@@ -12,7 +12,7 @@ Definitions (state them in the report):
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -128,11 +128,13 @@ def summarize(records: List[Dict], n_boot: int = 1000, seed: int = 0) -> Dict:
 # ------------------------------------------------------------------------------- decoding
 @torch.no_grad()
 def decode_dataset(model, dataset, tokenizer, ctx: D.DistContext, batch_frames: int, amp: bool = False,
-                   chunk: Optional[Sequence[int]] = None, num_workers: int = 2, pin_memory: bool = False) -> List[Dict]:
+                   chunk: Optional[Sequence[int]] = None, num_workers: int = 2, pin_memory: bool = False,
+                   collate_fn: Optional[Callable] = None) -> List[Dict]:
     """Greedy-decode the whole dataset, split across ranks; returns records from ALL ranks (every rank)."""
+    _collate = collate_fn if collate_fn is not None else collate
     sampler = DynamicBatchSampler(dataset.num_frames, batch_frames, ctx.world_size, ctx.rank,
                                   shuffle=False, pad_to_world=False)
-    loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate, num_workers=num_workers,
+    loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=_collate, num_workers=num_workers,
                         pin_memory=pin_memory)
     was_training = model.training
     model.eval()
@@ -163,9 +165,11 @@ def tokenizer_blank(tokenizer) -> int:
 
 
 def evaluate(model, dataset, tokenizer, ctx: D.DistContext, batch_frames: int, amp: bool = False,
-             chunk: Optional[Sequence[int]] = None, num_workers: int = 2, pin_memory: bool = False, n_boot: int = 1000) -> Tuple[Dict, List[Dict]]:
+             chunk: Optional[Sequence[int]] = None, num_workers: int = 2, pin_memory: bool = False,
+             n_boot: int = 1000, collate_fn: Optional[Callable] = None) -> Tuple[Dict, List[Dict]]:
     """Decode + summarise. Every rank gets the same summary (computed on rank 0, then broadcast)."""
-    recs = decode_dataset(model, dataset, tokenizer, ctx, batch_frames, amp, chunk, num_workers, pin_memory=pin_memory)
+    recs = decode_dataset(model, dataset, tokenizer, ctx, batch_frames, amp, chunk, num_workers,
+                          pin_memory=pin_memory, collate_fn=collate_fn)
     summary = summarize(recs, n_boot=n_boot) if ctx.is_main else None
     summary = D.broadcast_object(summary)
     return summary, recs

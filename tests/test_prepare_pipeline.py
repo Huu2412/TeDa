@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -106,10 +107,13 @@ def test_prepare_resume_and_scan(shards, tmp_path):
 
     scan_out = tmp_path / "scan"
     final = tmp_path / "manifest.tsv"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
     subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "scan_text.py"), "--manifest-raw", str(out / "manifest_raw.tsv"),
          "--out-dir", str(scan_out), "--manifest-out", str(final), "--config", str(ROOT / "configs" / "text_norm.yaml")],
-        check=True, cwd=ROOT, env={"PYTHONPATH": str(ROOT / "src"), "PATH": ""},
+        check=True, cwd=ROOT, env=env,
     )
     rows = {r["utt_id"]: r for r in read_tsv(final)}
     assert len(rows) == 4  # nothing dropped

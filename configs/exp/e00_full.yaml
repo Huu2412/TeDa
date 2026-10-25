@@ -1,0 +1,28 @@
+# E00F: Full fine-tune -- ViP-VL encoder fully unfrozen + CTC head.
+#
+# WARNING - memory: unfreezing all 12 conformer blocks roughly doubles the number of distinct
+# tensor shapes seen by cuDNN (forward AND backward per block) compared to the 4-block frozen
+# baseline. train.pad_multiple=128 is therefore critical here to keep cuDNN plan-cache RAM
+# under control.
+#
+# GPU memory: with all 12 blocks active the peak GPU footprint is ~2-3x the frozen baseline.
+# max_frames_per_batch is reduced to 16000 (was 24000) and accum_grad raised to 3 so the
+# effective batch size stays roughly the same as E00.
+#
+# LR: lr_encoder is dropped to 5e-5 (was 1e-4). Full fine-tuning is sensitive to large LR
+# on the pretrained weights; a smaller value reduces the risk of catastrophic forgetting.
+exp_name: e00_full
+
+encoder:
+  freeze_embed: false        # unfreeze subsampling front-end
+  freeze_layers: []          # unfreeze ALL 12 conformer blocks
+  freeze_after_norm: false
+
+train:
+  max_frames_per_batch: 16000   # reduced from 24000 to fit full backward through 12 blocks
+  accum_grad: 3                 # keeps effective batch ~same as E00 (24000*2*2 ~ 16000*2*3)
+  num_workers: 1                # 1 worker per GPU (2 total) saves ~4 GB RAM vs default 2
+  lr_encoder: 5.0e-5            # lower LR for pretrained weights (was 1e-4)
+  warmup_steps: 1000            # longer warmup when fully unfrozen
+  pad_multiple: 128             # CRITICAL: limits cuDNN plan-cache RAM growth
+  max_host_gib: 22              # save & exit cleanly before SIGKILL; re-run to resume

@@ -29,6 +29,33 @@ from teda.utils.logging import MetricsWriter
 log = logging.getLogger("teda")
 
 
+def _host_ram_gib() -> float:
+    """Return current process RSS (resident set size) in GiB. Falls back to 0 if psutil is absent."""
+    try:
+        import psutil
+        import os
+        return psutil.Process(os.getpid()).memory_info().rss / 2 ** 30
+    except Exception:
+        return 0.0
+
+
+def _sys_ram_gib() -> float:
+    """Return total system used RAM in GiB."""
+    try:
+        import psutil
+        return psutil.virtual_memory().used / 2 ** 30
+    except Exception:
+        return 0.0
+
+
+def _malloc_trim() -> None:
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def _worker_init(_worker_id: int) -> None:
     torch.set_num_threads(1)  # one fbank thread per worker; avoids CPU oversubscription on Kaggle's few cores
 
@@ -64,11 +91,31 @@ class Trainer:
         )
         nw = int(self.tc.get("num_workers", 2))
         pin = bool(self.tc.get("pin_memory", False))
+        pw = bool(self.tc.get("persistent_workers", True)) if nw > 0 else False
+        pf = int(self.tc.get("prefetch_factor", 2)) if nw > 0 else None
+        self.pad_multiple = int(self.tc.get("pad_multiple", 1))
+        _collate = (lambda b: collate(b, self.pad_multiple)) if self.pad_multiple > 1 else collate
         self.loader = DataLoader(
-            train_ds, batch_sampler=self.sampler, collate_fn=collate, num_workers=nw,
-            pin_memory=pin, persistent_workers=nw > 0,
-            prefetch_factor=2 if nw > 0 else None, worker_init_fn=_worker_init,
+            train_ds, batch_sampler=self.sampler, collate_fn=_collate, num_workers=nw,
+            pin_memory=pin, persistent_workers=pw,
+            prefetch_factor=pf, worker_init_fn=_worker_init,
         )
+        # Limit the cuDNN autotuner plan cache: each unique tensor shape causes cuDNN to allocate
+        # and hold a convolution plan in *host* RAM. With dynamic audio batching the number of
+        # distinct shapes can be very large (especially after unfreezing all 12 blocks). Capping
+        # the cache at 32 (per engine) prevents unbounded growth while still covering most shapes.
+        if ctx.device.type == "cuda":
+            try:
+                torch.backends.cudnn.benchmark = False      # benchmark=True makes the problem worse
+                torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True)
+            except Exception:
+                pass
+            # torch >= 2.3 exposes a plan-cache limit; ignore silently on older versions.
+            try:
+                torch.cuda.set_per_process_memory_fraction(1.0)  # no-op but ensures driver is init
+            except Exception:
+                pass
+        self.max_host_gib: Optional[float] = float(self.tc.max_host_gib) if self.tc.get("max_host_gib") else None
         self.accum = int(self.tc.get("accum_grad", 1))
         self.micro_per_epoch = len(self.sampler)
         self.steps_per_epoch = math.ceil(self.micro_per_epoch / self.accum)
@@ -192,13 +239,24 @@ class Trainer:
 
                 if self.step % log_every == 0:
                     avg = D.all_reduce_mean(win_loss / max(win_n, 1), self.ctx.device)
-                    mem = torch.cuda.max_memory_allocated() / 2**30 if self.ctx.device.type == "cuda" else 0.0
-                    log.info("ep %d step %d/%d | ctc %.3f | lr %.2e | gnorm %.2f | %.1f GiB | nonfinite %d | %.0f min",
+                    gpu_gib = torch.cuda.max_memory_allocated() / 2**30 if self.ctx.device.type == "cuda" else 0.0
+                    host_gib = _host_ram_gib()
+                    sys_gib = _sys_ram_gib()
+                    log.info("ep %d step %d/%d | ctc %.3f | lr %.2e | gnorm %.2f | gpu %.1f GiB | host %.1f GiB | sys %.1f GiB | nonfinite %d | %.0f min",
                              epoch, self.step, self.total_steps, avg, self.sched.get_last_lr()[0], win_gn / log_every,
-                             mem, nonfinite, (time.time() - t0) / 60)
+                             gpu_gib, host_gib, sys_gib, nonfinite, (time.time() - t0) / 60)
                     self.metrics.write(kind="train", step=self.step, epoch=epoch, loss_ctc=avg,
-                                       lr=self.sched.get_last_lr()[0], grad_norm=win_gn / log_every, peak_gib=mem)
+                                       lr=self.sched.get_last_lr()[0], grad_norm=win_gn / log_every,
+                                       peak_gpu_gib=gpu_gib, host_gib=host_gib, sys_gib=sys_gib)
                     win_loss, win_n, win_gn = 0.0, 0, 0.0
+                    _malloc_trim()
+                sys_gib = _sys_ram_gib()
+                if (self.max_host_gib and _host_ram_gib() > self.max_host_gib) or (sys_gib > 27.0):
+                    self.save_last()
+                    status = "host_ram_limit"
+                    log.warning("host RAM limit exceeded at step %d (process: %.1f GiB, sys: %.1f GiB): saved last.pt. Re-run the same command to resume.",
+                                self.step, _host_ram_gib(), sys_gib)
+                    return {"status": status, "step": self.step, "best_wer": self.best_wer}
                 if self.step % save_every == 0:
                     self.save_last()
                 if self.step % int(self.tc.get("time_check_every", 20)) == 0 and self._time_exceeded(t0):
@@ -217,6 +275,7 @@ class Trainer:
             gc.collect()
             if self.ctx.device.type == "cuda":
                 torch.cuda.empty_cache()
+            _malloc_trim()
 
         result = {"status": status, "step": self.step, "epochs": int(self.tc.epochs),
                   "best_valid_wer": self.best_wer, "best_step": self.best_step}
@@ -228,17 +287,26 @@ class Trainer:
     # -------------------------------------------------------------------- validation
     def validate(self) -> Dict:
         ec = self.cfg.get("eval", {})
-        summary, _ = evaluate(
+        pad_multiple = int(ec.get("pad_multiple", self.pad_multiple))
+        _collate = (lambda b: collate(b, pad_multiple)) if pad_multiple > 1 else collate
+        summary, recs = evaluate(
             self.raw, self.valid_ds, self.tok, self.ctx, int(ec.get("batch_frames", 20000)),
             amp=self.use_amp, chunk=ec.get("chunk"), num_workers=int(self.tc.get("num_workers", 0)),
-            pin_memory=bool(self.tc.get("pin_memory", False)),
+            pin_memory=bool(ec.get("pin_memory", False)),
             n_boot=0 if not ec.get("bootstrap_in_training", False) else 1000,
+            collate_fn=_collate,
         )
+        # Free the per-utterance record list immediately; it can be several hundred MB on the full
+        # valid set and Python's GC would otherwise keep it alive until the next GC cycle.
+        del recs
         wer = summary["wer"]
         reg = " ".join(f"{k}={v['wer']:.4f}" for k, v in summary["by_region"].items())
-        log.info("VALID epoch %d step %d | WER %.4f CER %.4f | %s", self.epoch, self.step, wer, summary["cer"], reg)
+        host_gib = _host_ram_gib()
+        log.info("VALID epoch %d step %d | WER %.4f CER %.4f | host %.1f GiB | %s",
+                 self.epoch, self.step, wer, summary["cer"], host_gib, reg)
         self.metrics.write(kind="valid", step=self.step, epoch=self.epoch, wer=wer, cer=summary["cer"],
-                           by_region={k: v["wer"] for k, v in summary["by_region"].items()})
+                           by_region={k: v["wer"] for k, v in summary["by_region"].items()},
+                           host_gib=host_gib)
         if wer < self.best_wer:
             self.best_wer, self.best_step = wer, self.step
             if self.ctx.is_main:
@@ -250,4 +318,5 @@ class Trainer:
         gc.collect()
         if self.ctx.device.type == "cuda":
             torch.cuda.empty_cache()
+        _malloc_trim()
         return summary

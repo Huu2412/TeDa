@@ -57,6 +57,15 @@ train:
   accum_grad: 2
   num_workers: 2                    # CPU workers computing fbank; Kaggle has few cores
   pin_memory: false                 # false prevents unbounded caching host allocator RAM leak on dynamic audio batching
+  persistent_workers: true          # keep worker processes alive between epochs (faster, but uses more RAM per worker)
+  prefetch_factor: 2                # batches to prefetch per worker; lower = less RAM used by prefetch buffers
+  pad_multiple: 128                 # round padded time dimension UP to this multiple of frames.
+                                    # cuDNN caches a convolution/attention plan per unique tensor shape;
+                                    # with dynamic audio batching there can be thousands of shapes, each
+                                    # holding tens of MB of host RAM that is never released.
+                                    # 128 frames = 1.28 s, so at most a few dozen distinct shapes are
+                                    # ever seen. The extra zero-padding is masked by feat_lens so the
+                                    # model result and loss are identical (covered by tests).
   amp: fp16                         # T4 has no bf16
   grad_clip: 5.0
   lr_encoder: 1.0e-4                # untuned starting points
@@ -71,6 +80,9 @@ train:
   log_every: 50
   save_every_steps: 500
   max_hours: 11.0                   # stop cleanly (saving last.pt) this long after THIS run started; re-run to resume
+  max_host_gib: 22                  # stop and save last.pt if host RAM (RSS) of this rank exceeds this threshold (GiB).
+                                    # Kaggle gives 30 GiB total; 22 leaves headroom for the OS and the other rank.
+                                    # Set to null to disable. Re-run the same command to resume.
   time_check_every: 20              # optimizer steps between time-limit checks
   force: false                      # true = train again even if outputs/<exp>/done.json exists
 

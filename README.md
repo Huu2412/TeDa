@@ -27,7 +27,13 @@ python scripts/check_encoder.py                      # real ViP-VL bundle loads 
 python scripts/probe_memory.py --frames 12000 18000 24000 32000    # pick train.max_frames_per_batch (1 GPU)
 
 # train: re-running the same command resumes; a finished run is a no-op
-torchrun --nproc_per_node=2 scripts/train.py --exp e00_baseline --set data.data_dir=/kaggle/working/vimd16k
+# MALLOC_ARENA_MAX=2 limits glibc arena count -> reduces host RAM fragmentation on Kaggle
+# train.pad_multiple=128 rounds each batch's padded T-dim to a multiple of 128 frames;
+#   cuDNN caches one plan per unique tensor shape, so fewer shapes = less host RAM consumed.
+# train.max_host_gib=22 saves last.pt and exits if host RSS exceeds 22 GiB; re-run to resume.
+MALLOC_ARENA_MAX=2 torchrun --nproc_per_node=2 scripts/train.py --exp e00_baseline \
+    --set data.data_dir=/kaggle/working/vimd16k \
+           train.pad_multiple=128 train.max_host_gib=22
 python scripts/sweep.py --set data.data_dir=/kaggle/working/vimd16k   # freeze search -> outputs/sweep_freeze/summary.tsv
 python scripts/evaluate.py --exp e00_baseline --split valid --set data.data_dir=/kaggle/working/vimd16k
 ```

@@ -1,11 +1,31 @@
 #!/usr/bin/env python
 """Train one experiment.
 
-    torchrun --nproc_per_node=2 scripts/train.py --exp e00_baseline
+    MALLOC_ARENA_MAX=2 torchrun --nproc_per_node=2 scripts/train.py --exp e00_baseline
     python scripts/train.py --exp e00_baseline --set train.epochs=1 data.limit=64     # 1-process smoke test
 
 Re-running the same command resumes from outputs/<exp>/last.pt; a finished run (done.json) is a no-op.
+
+MEMORY NOTES
+------------
+MALLOC_ARENA_MAX=2: glibc by default creates up to 8*nCPU malloc arenas (memory pools). Each arena
+retains its own free-list and does not return pages to the OS until the arena is destroyed. On a
+Kaggle 2-CPU node the default can create ~16 arenas, bloating RSS by hundreds of MB. Setting this
+to 2 before any C library is loaded limits fragmentation without affecting performance.
+
+cuDNN plan cache: PyTorch / cuDNN keeps one convolution plan per unique tensor shape in host RAM.
+With dynamic audio batching, thousands of distinct (B, T, C) shapes may appear over a training run,
+especially after unfreezing all conformer blocks. This script caps the cache size at startup.
+Setting train.pad_multiple=128 in the config is the complementary fix: it collapses the number of
+distinct shapes to a few dozen.
 """
+
+import os
+# Set MALLOC_ARENA_MAX before importing any C-backed library so that glibc uses at most 2 arenas.
+# This must happen as early as possible in the process; once glibc has already allocated arenas
+# the env-var change has no effect.
+if "MALLOC_ARENA_MAX" not in os.environ:
+    os.environ["MALLOC_ARENA_MAX"] = "2"
 
 import argparse
 from pathlib import Path

@@ -147,6 +147,7 @@ def _env():
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     env["OMP_NUM_THREADS"] = "1"
+    env["USE_LIBUV"] = "0"
     return env
 
 
@@ -155,6 +156,8 @@ def _run(cmd, timeout=900):
 
 
 def test_two_process_ddp_train_then_evaluate_with_test_guard(tiny_dataset, tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("torch.distributed.run multi-process DDP requires libuv which is not built in Windows PyTorch")
     exp = _tiny_exp_file(tiny_dataset, tmp_path)
     r = _run([sys.executable, "-m", "torch.distributed.run", "--nproc_per_node=2", "scripts/train.py", "--exp", str(exp)])
     assert r.returncode == 0, (r.stdout + r.stderr)[-4000:]
