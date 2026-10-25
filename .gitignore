@@ -2,9 +2,10 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
-outputs/
-data/
-_download/
+/outputs/
+/data/
+/_download/
 *.wav
 *.pt
 *.zip
+
