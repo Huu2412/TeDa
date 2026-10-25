@@ -306,6 +306,9 @@ class Trainer:
             n_boot=0 if not ec.get("bootstrap_in_training", False) else 1000,
             collate_fn=_collate,
         )
+        if self.ctx.is_main and recs:
+            for s in recs[:2]:
+                log.info("VALID sample [%s] REF: %r | HYP: %r", s["utt_id"], s["ref"], s["hyp"])
         # Free the per-utterance record list immediately; it can be several hundred MB on the full
         # valid set and Python's GC would otherwise keep it alive until the next GC cycle.
         del recs
