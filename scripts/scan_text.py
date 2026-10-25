@@ -17,9 +17,14 @@ import argparse
 import json
 import random
 import re
+import sys
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from teda.data.label_maps import REGIONS, region_to_id
 from teda.data.text_norm import Normalizer, tone_style_counts

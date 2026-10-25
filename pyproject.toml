@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "teda"
 version = "0.0.2"
 description = "TeDA: Text-Guided and Dialect-Aware Representation Learning for Vietnamese ASR with Audio-Only Inference"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 # torch and torchaudio are preinstalled on Kaggle and deliberately NOT listed (pip must not replace them).
 dependencies = [
     "numpy",

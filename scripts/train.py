@@ -28,7 +28,12 @@ if "MALLOC_ARENA_MAX" not in os.environ:
     os.environ["MALLOC_ARENA_MAX"] = "2"
 
 import argparse
+import sys
 from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from teda.data.tokenizer import BPETokenizer
 from teda.data.vimd_dataset import VimdDataset

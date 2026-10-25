@@ -7,7 +7,12 @@ Writes artifacts/tokenizer/bpe1024.model (+ .vocab): small, so commit it to the 
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from teda.data.tokenizer import BPETokenizer, train_bpe
 from teda.utils.config import load_config
