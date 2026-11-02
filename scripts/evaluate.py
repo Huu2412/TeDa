@@ -57,8 +57,12 @@ def main() -> None:
     chunk = [int(x) for x in a.chunk.split(",")] if a.chunk else cfg.get("eval", {}).get("chunk")
 
     tok = BPETokenizer(cfg.data.tokenizer_model)
+    align_cache = None
+    if cfg.data.get("align_cache"):
+        from teda.data.align_cache import AlignCache
+        align_cache = AlignCache(cfg.data.align_cache, mode=str(cfg.model.align.get("target_mode", "phobert")))
     ds = VimdDataset(cfg.data.data_dir, cfg.data.manifest, a.split, tok, cfg.features, train=False,
-                     text_field=cfg.data.text_field, limit=cfg.data.get("limit"))
+                     text_field=cfg.data.text_field, limit=cfg.data.get("limit"), align_cache=align_cache)
     model, _ = build_model(cfg, tok.vocab_size)
     ck = load_ckpt(ckpt_path)
     model.load_state_dict(ck["model"])
