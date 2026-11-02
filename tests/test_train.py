@@ -24,11 +24,27 @@ from teda.utils import dist as D
 from teda.utils.ckpt import load_ckpt, read_json
 
 
-def make_trainer(tiny, out, **train_over):
+def make_trainer(tiny, out, accent=False, align_cache=None, align=None, **train_over):
     cfg = tiny_cfg(**train_over)
+    ac = None
+    if align_cache is not None:
+        from teda.data.align_cache import AlignCache
+        mode = (align or {}).get("target_mode", "phobert")
+        ac = AlignCache(align_cache, mode=mode)
+        cfg.model.align.enabled = True
+        cfg.model.align.text_dim = ac.dim
+        cfg.model.align.proj_hidden = 32
+        cfg.model.align.start_step = 0
+        cfg.model.align.ramp_steps = 2
+        for k, v in (align or {}).items():
+            cfg.model.align[k] = v
+    if accent:
+        cfg.model.accent.enabled = True
+        cfg.model.accent.ramp_steps = 2
+        cfg.model.accent.start_step = 0
     cfg.data.data_dir = str(tiny["root"])
     tok = BPETokenizer(tiny["tokenizer"])
-    common = dict(data_dir=tiny["root"], manifest="manifest.tsv", tokenizer=tok, feat_cfg=cfg.features)
+    common = dict(data_dir=tiny["root"], manifest="manifest.tsv", tokenizer=tok, feat_cfg=cfg.features, align_cache=ac)
     train_ds = VimdDataset(split="train", train=True, drop_infeasible_ctc=True, **common)
     valid_ds = VimdDataset(split="valid", train=False, **common)
     torch.manual_seed(0)
@@ -203,18 +219,3 @@ def test_sweep_runs_each_config_once_and_writes_the_summary(tiny_dataset, tmp_pa
     # a second invocation finds both runs done and does no training
     r2 = _run([sys.executable, "scripts/sweep.py", "--sweep", str(sw), "--nproc", "1"])
     assert r2.returncode == 0 and "===" not in r2.stdout
-
-
-def test_trainer_with_accent_head(tiny_dataset, tmp_path):
-    out = tmp_path / "accent_run"
-    tr, model = make_trainer(tiny_dataset, out, epochs=1, log_every=1)
-    from teda.models.heads.accent_head import AccentHead
-    model.accent = AccentHead(model.encoder.output_size, num_classes=3)
-    model.weight_accent = 0.5
-    tr.opt = tr._build_optimizer()
-    res = tr.fit()
-    assert res["status"] == "done" and res["step"] > 0
-    metrics = [json.loads(line) for line in (out / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
-    train_metrics = [m for m in metrics if m.get("kind") == "train"]
-    assert any("loss_accent" in m for m in train_metrics)
-

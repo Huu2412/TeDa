@@ -27,6 +27,10 @@ import os
 if "MALLOC_ARENA_MAX" not in os.environ:
     os.environ["MALLOC_ARENA_MAX"] = "2"
 
+# cuDNN keeps one execution plan per input shape in host RAM; bound it (the default is huge). The docstring above
+# promised a cap, this is the line that actually sets it. It must be set before the first convolution runs.
+os.environ.setdefault("TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "200")
+
 import argparse
 import sys
 from pathlib import Path
@@ -35,7 +39,9 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from teda.data.label_maps import REGIONS
 from teda.data.tokenizer import BPETokenizer
+from teda.data.align_cache import AlignCache
 from teda.data.vimd_dataset import VimdDataset
 from teda.engine.trainer import Trainer
 from teda.models.encoder import resolve_bundle
@@ -68,13 +74,25 @@ def main() -> None:
     D.barrier()
 
     tok = BPETokenizer(cfg.data.tokenizer_model)
+    align_cache = None
+    if cfg.model.get("align", {}).get("enabled", False):
+        if not cfg.data.get("align_cache"):
+            raise SystemExit("model.align.enabled=true needs data.align_cache=<dir built by scripts/build_phobert_cache.py>")
+        align_cache = AlignCache(cfg.data.align_cache, mode=str(cfg.model.align.get("target_mode", "phobert")))
+        log.info("align cache %s: %d utterances, dim %d, unit=%s, target_mode=%s", cfg.data.align_cache, len(align_cache.index),
+                 align_cache.dim, align_cache.meta.get("unit"), align_cache.mode)
     common = dict(data_dir=cfg.data.data_dir, manifest=cfg.data.manifest, tokenizer=tok, feat_cfg=cfg.features,
-                  text_field=cfg.data.text_field, limit=cfg.data.get("limit"))
+                  text_field=cfg.data.text_field, limit=cfg.data.get("limit"), align_cache=align_cache)
     train_ds = VimdDataset(split="train", train=True, max_dur=cfg.train.get("max_dur"),
                            drop_infeasible_ctc=bool(cfg.train.get("drop_infeasible_ctc", True)), **common)
     valid_ds = VimdDataset(split="valid", train=False, **common)
     model, _ = build_model(cfg, tok.vocab_size)
     log.info("world_size=%d device=%s exp=%s out=%s", ctx.world_size, ctx.device, cfg.exp_name, out)
+    if model.accent is not None and str(cfg.model.accent.get("class_weights", "balanced")) == "balanced":
+        counts = [sum(1 for r in train_ds.rows if r["_region_id"] == i) for i in range(len(REGIONS))]
+        model.accent.set_class_weights(counts)
+        log.info("accent class counts (train) %s -> loss weights %s", dict(zip(REGIONS, counts)),
+                 [round(x, 3) for x in model.accent.class_weight.tolist()])
 
     Trainer(cfg, model, train_ds, valid_ds, tok, ctx, out).fit()
     D.cleanup()

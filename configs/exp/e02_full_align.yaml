@@ -1,0 +1,12 @@
+# E02: E00 full fine-tune (e00_full_ft) + word-level alignment to frozen PhoBERT vectors (CIF). Accent head OFF, so a
+# WER gap to e00_full_ft is attributable to the alignment loss. No train.* overrides (frames / accum / lr / warmup must
+# equal e00_full_ft). Run with: --set data.align_cache=/path/to/phobert_cache
+# Controls (same file): model.align.target_mode=random_word  and  model.align.target_mode=shuffle
+exp_name: e02_full_align
+encoder:
+  freeze_embed: false
+  freeze_layers: []
+  freeze_after_norm: false
+model:
+  align:
+    enabled: true

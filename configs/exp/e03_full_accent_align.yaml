@@ -1,0 +1,12 @@
+# E03: E00 full fine-tune + accent head (E01) + CIF/PhoBERT alignment (E02). Compare with e00_full_ft, e01_full_accent and
+# e02_full_align. Run with: --set data.align_cache=/path/to/phobert_cache
+exp_name: e03_full_accent_align
+encoder:
+  freeze_embed: false
+  freeze_layers: []
+  freeze_after_norm: false
+model:
+  accent:
+    enabled: true
+  align:
+    enabled: true

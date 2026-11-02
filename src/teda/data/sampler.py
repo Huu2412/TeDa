@@ -26,9 +26,15 @@ class DynamicBatchSampler:
         bucket_size: int = 512,
         max_batch_size: Optional[int] = None,
         pad_to_world: bool = True,
+        pad_multiple: int = 1,
     ):
         if max_frames <= 0:
             raise ValueError("max_frames must be positive")
+        # Each utterance counts with its length rounded UP to a multiple of pad_multiple, which is also how
+        # collate pads. Few distinct (batch, length) shapes keeps cuDNN's per-shape plan cache (host RAM) small.
+        self.pad_multiple = max(int(pad_multiple), 1)
+        pm = self.pad_multiple
+        lengths = [-(-int(n) // pm) * pm for n in lengths]
         too_long = [i for i, n in enumerate(lengths) if n > max_frames]
         if too_long:
             raise ValueError(

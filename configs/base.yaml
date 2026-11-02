@@ -16,6 +16,7 @@ data:
   tokenizer_model: artifacts/tokenizer/bpe1024.model   # built by scripts/build_tokenizer.py (commit it)
   vocab_size: 1024                  # id 0 = <blank>, id 1 = <unk>
   limit: null                       # debug only: first N utterances of each split
+  align_cache: null                 # E02/E03: dir built by scripts/build_phobert_cache.py (PhoBERT word vectors)
 
 features:                           # same fbank as the ViP-VL pipeline
   num_mel_bins: 80
@@ -46,11 +47,44 @@ encoder:
 
 model:
   ctc_dropout: 0.1
+  # E01: auxiliary region classifier on the encoder (training only; removed at inference)
   accent:
     enabled: false
-    num_classes: 3           # North (0), Central (1), South (2)
-    weight: 0.0              # lambda_accent (0.0 = disabled)
+    num_classes: 3                  # North (0), Central (1), South (2)
+    layers: weighted                # weighted = learned mix of all 12 block outputs | last = final output only
+    pooling: att                    # att = attentive pooling | asp = attentive mean+std
+    hidden: 256
     dropout: 0.1
+    label_smoothing: 0.0
+    class_weights: balanced         # inverse frequency from TRAIN counts | none
+    # CTC is a per-utterance SUM (tens-hundreds) and the accent CE is ~1, so a fixed lambda makes accent negligible.
+    weighting: relative             # relative: accent term = lambda x CTC term at chance level (a SHARE, scale-free)
+                                    # fixed:    accent term = lambda x CE
+    lambda: 0.1                     # relative: share of the CTC term (try 0.05 / 0.1 / 0.2) | fixed: weight on CE
+    start_step: 100                # before this optimizer step the head trains on DETACHED features (no gradient into the
+                                    # encoder) so CTC can leave its early all-blank plateau undisturbed. Choose it near
+                                    # the step where E00's valid WER first drops below 1.0. 0 = attached from step 0.
+    ramp_steps: 500                 # after start_step, lambda grows linearly from 0 over this many optimizer steps
+    grad_probe_every: 200           # every N steps (rank 0) log the accent gradient's share next to CTC's on one
+                                    # encoder block, and their cosine; 0 = off
+    grad_probe_block: -1            # which block to probe (-1 = last)
+  # E02/E03: word-level alignment of encoder frames (CIF) to FROZEN PhoBERT word vectors. Training only: inference uses
+  # the encoder + CTC head exactly like E00. Needs data.align_cache.
+  align:
+    enabled: false
+    layer: last                     # encoder output that is aligned: last | a block index 0..11
+    text_dim: 768                   # PhoBERT-base hidden size
+    kernel: 3                       # conv width of the CIF weight predictor
+    proj_hidden: 1024
+    dropout: 0.1
+    target_mode: phobert            # phobert = real targets | random_word = fixed random vector per word (control)
+                                    # | shuffle = real vectors paired with random words of the batch (control)
+    weighting: relative             # relative: term = lambda x CTC (the cosine loss is O(1), CTC is a sum of tens-hundreds)
+    lambda_align: 0.1               # share of the CTC term taken by the alignment loss (1 - cosine, token mean)
+    lambda_qty: 0.05                # share for the count loss |sum(alpha) - N| / N, which teaches CIF to fire N times
+    start_step: 100                # before this step the aligner trains on DETACHED features (encoder untouched); only
+                                    # the CIF/projection learn, so CTC leaves its early plateau undisturbed
+    ramp_steps: 500                 # then both weights grow linearly from 0 over this many optimizer steps
 
 train:
   seed: 1234

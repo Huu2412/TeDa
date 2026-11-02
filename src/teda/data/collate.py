@@ -26,7 +26,16 @@ def collate(batch: List[Dict], pad_multiple: int = 1) -> Dict:
     for i, b in enumerate(batch):
         feats[i, : b["feats"].size(0)] = b["feats"]
         tokens[i, : b["tokens"].numel()] = b["tokens"]
+    extra = {}
+    if "word_vecs" in batch[0]:
+        n_words = torch.tensor([b["word_vecs"].size(0) for b in batch], dtype=torch.long)
+        dim = batch[0]["word_vecs"].size(1)
+        targets = torch.zeros(B, max(int(n_words.max()), 1), dim, dtype=torch.float16)
+        for i, b in enumerate(batch):
+            targets[i, : b["word_vecs"].size(0)] = b["word_vecs"]
+        extra = {"word_targets": targets, "n_words": n_words}
     return {
+        **extra,
         "feats": feats,
         "feat_lens": feat_lens,   # true lengths, NOT padded_max
         "tokens": tokens,

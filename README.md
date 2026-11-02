@@ -55,3 +55,22 @@ GradScaler, NCCL, and real ViP-VL weights** - `check_encoder.py` and `probe_memo
 
 `third_party/chunkformer/` vendors the ChunkFormer encoder code (CC BY 4.0, commit 24b1258, unmodified). ViP-VL
 weights are downloaded from `khanhld/vip-vl-base-vie`. Please cite the ChunkFormer paper (ICASSP 2025).
+
+## E02 / E03: word-level alignment to PhoBERT (training only)
+
+```bash
+# 1) once: PhoBERT word vectors for every utterance (units = the words of text_norm, so CIF fires once per word)
+python scripts/build_phobert_cache.py --data-dir $DATA_DIR --out /kaggle/working/phobert_cache --unit syllable
+#    --unit word  = VnCoreNLP word segmentation (what PhoBERT was pretrained on; needs `pip install py_vncorenlp` + a JDK)
+# 2) E02 = E00 + alignment loss (accent off).  E03 = E00 + accent + alignment.
+torchrun --nproc_per_node=2 scripts/train.py --exp e02_full_align \
+    --set data.data_dir=$DATA_DIR data.align_cache=/kaggle/working/phobert_cache train.max_hours=10
+# controls (does PhoBERT matter, or is any auxiliary loss enough?):
+#    model.align.target_mode=random_word   |   model.align.target_mode=shuffle
+```
+
+The CIF aligner turns encoder frames into one vector per word, projects it and compares it (cosine) with the frozen,
+standardised PhoBERT vector of that word. A count loss teaches CIF to fire N times for N words. Before
+`model.align.start_step` the aligner trains on detached features, then both weights ramp up. Validation logs
+`align cos`, `align top1` (does word j of the audio retrieve word j of the text among the sentence's words?) and `qty err`.
+Inference uses only the encoder and the CTC head.

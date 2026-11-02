@@ -85,15 +85,16 @@ class Trainer:
             if ctx.distributed else self.raw
         )
 
+        self.pad_multiple = int(self.tc.get("pad_multiple", 1))
         self.sampler = DynamicBatchSampler(
             train_ds.num_frames, int(self.tc.max_frames_per_batch), ctx.world_size, ctx.rank,
             shuffle=True, seed=int(self.tc.seed), max_batch_size=self.tc.get("max_batch_size"),
+            pad_multiple=self.pad_multiple,
         )
         nw = int(self.tc.get("num_workers", 2))
         pin = bool(self.tc.get("pin_memory", False))
         pw = bool(self.tc.get("persistent_workers", True)) if nw > 0 else False
         pf = int(self.tc.get("prefetch_factor", 2)) if nw > 0 else None
-        self.pad_multiple = int(self.tc.get("pad_multiple", 1))
         _collate = (lambda b: collate(b, self.pad_multiple)) if self.pad_multiple > 1 else collate
         self.loader = DataLoader(
             train_ds, batch_sampler=self.sampler, collate_fn=_collate, num_workers=nw,
@@ -117,6 +118,14 @@ class Trainer:
                 pass
         self.max_host_gib: Optional[float] = float(self.tc.max_host_gib) if self.tc.get("max_host_gib") else None
         self.accum = int(self.tc.get("accum_grad", 1))
+        ac = (cfg.get("model", {}) or {}).get("accent", {}) or {}
+        self.acc_start = int(ac.get("start_step", 0))      # before this step the accent head sees detached features
+        self.acc_ramp = int(ac.get("ramp_steps", 0))       # then its loss weight grows 0 -> 1 over this many steps
+        al = (cfg.get("model", {}) or {}).get("align", {}) or {}
+        self.al_start = int(al.get("start_step", 0))        # before this step the aligner learns on detached features
+        self.al_ramp = int(al.get("ramp_steps", 0))         # then its loss weight grows 0 -> 1 over this many steps
+        self.probe_every = int(ac.get("grad_probe_every", 0))
+        self.probe_block = int(ac.get("grad_probe_block", -1))
         self.micro_per_epoch = len(self.sampler)
         self.steps_per_epoch = math.ceil(self.micro_per_epoch / self.accum)
         self.total_steps = self.steps_per_epoch * int(self.tc.epochs)
@@ -182,6 +191,24 @@ class Trainer:
                  path, self.epoch, self.micro_in_epoch, self.step, self.best_wer)
 
     # ------------------------------------------------------------------------- loop
+    def _grad_probe(self, out: Dict) -> Optional[Dict]:
+        """How large is the accent gradient next to CTC's on ONE encoder block? Uses autograd.grad on the graph of
+        this micro-batch (nothing is accumulated, no DDP communication, rank 0 only). Under fp16 both losses are
+        multiplied by the GradScaler scale first so small gradients do not underflow."""
+        params = [p for p in self.raw.encoder.net.encoders[self.probe_block].parameters() if p.requires_grad]
+        if not params:
+            return None
+        scale = float(self.scaler.get_scale()) if self.use_amp else 1.0
+        g_ctc = torch.autograd.grad(out["_graph_ctc"] * scale, params, retain_graph=True, allow_unused=True)
+        g_acc = torch.autograd.grad(out["_graph_acc"] * scale, params, retain_graph=True, allow_unused=True)
+        vec = lambda gs: torch.cat([(g if g is not None else torch.zeros_like(p)).float().flatten() for g, p in zip(gs, params)]) / scale
+        a, b = vec(g_ctc), vec(g_acc)
+        na, nb = float(a.norm()), float(b.norm())
+        if not (math.isfinite(na) and math.isfinite(nb)):
+            return None  # fp16 overflow in this probe; the next one will do
+        return {"grad_ctc": na, "grad_acc": nb, "acc_share": nb / max(na + nb, 1e-12),
+                "cos": float(torch.dot(a, b) / max(na * nb, 1e-12))}
+
     def _time_exceeded(self, t0: float) -> bool:
         limit = self.tc.get("max_hours")
         flag = bool(limit) and (time.time() - t0) > float(limit) * 3600
@@ -197,6 +224,7 @@ class Trainer:
         self.raw.train()
         win_loss, win_n, win_gn, nonfinite = 0.0, 0, 0.0, 0
         win_acc_loss, win_acc_acc = 0.0, 0.0
+        win_al = dict.fromkeys(("align", "qty", "cos", "top1", "n"), 0.0)
         log_every = int(self.tc.get("log_every", 50))
         save_every = int(self.tc.get("save_every_steps", 500))
         status = "done"
@@ -213,7 +241,16 @@ class Trainer:
                 accum_n += 1
                 last_micro = self.micro_in_epoch >= n_micro
                 boundary = accum_n == self.accum or last_micro
-                inputs = to_device({k: batch[k] for k in ("feats", "feat_lens", "tokens", "token_lens", "region_ids") if k in batch}, self.ctx.device)
+                inputs = to_device({k: batch[k] for k in ("feats", "feat_lens", "tokens", "token_lens", "region_ids", "word_targets", "n_words") if k in batch}, self.ctx.device)
+
+                if self.raw.accent is not None:
+                    # phase 1 (step < start): head trains on detached features; phase 2: attached, weight ramps 0 -> 1
+                    self.raw.accent_detached = self.step < self.acc_start
+                    self.raw.aux_scale = min(1.0, (self.step - self.acc_start + 1) / self.acc_ramp) if self.acc_ramp else 1.0
+
+                if self.raw.align is not None:
+                    self.raw.align_detached = self.step < self.al_start
+                    self.raw.align_scale = min(1.0, (self.step - self.al_start + 1) / self.al_ramp) if self.al_ramp else 1.0
 
                 sync = self.ddp.no_sync() if (self.ctx.distributed and not boundary) else contextlib.nullcontext()
                 with sync:
@@ -222,11 +259,25 @@ class Trainer:
                     loss = out["loss"]
                     if not torch.isfinite(loss):
                         nonfinite += 1
+                    if (self.ctx.is_main and self.probe_every and "_graph_acc" in out and accum_n == 1
+                            and (self.step + 1) % self.probe_every == 0):
+                        pr = self._grad_probe(out)
+                        if pr:
+                            log.info("grad probe step %d (block %d): |g_ctc| %.3g |g_acc| %.3g -> accent share %.1f%% | cos(g_ctc,g_acc) %+.2f",
+                                     self.step + 1, self.probe_block % len(self.raw.encoder.net.encoders), pr["grad_ctc"],
+                                     pr["grad_acc"], 100 * pr["acc_share"], pr["cos"])
+                            self.metrics.write(kind="grad_probe", step=self.step + 1, **pr)
                     self.scaler.scale(loss / self.accum).backward()
                 win_loss += float(out["loss_ctc"])
                 if "loss_accent" in out:
                     win_acc_loss += float(out["loss_accent"])
                     win_acc_acc += float(out["accent_acc"])
+                if "loss_align" in out:
+                    win_al["align"] += float(out["loss_align"])
+                    win_al["qty"] += float(out["loss_qty"])
+                    win_al["cos"] += float(out["align_cos"])
+                    win_al["top1"] += float(out["align_top1"])
+                    win_al["n"] += 1
                 win_n += 1
                 if not boundary:
                     continue
@@ -251,6 +302,13 @@ class Trainer:
                              epoch, self.step, self.total_steps, avg, acc_str, self.sched.get_last_lr()[0], win_gn / log_every,
                              gpu_gib, host_gib, sys_gib, nonfinite, (time.time() - t0) / 60)
                     metrics_kwargs = {}
+                    if win_al["n"]:
+                        k = win_al["n"]
+                        al_str = (f" | align {win_al['align']/k:.3f} cos {win_al['cos']/k:.3f} top1 {100*win_al['top1']/k:.1f}%"
+                                  f" qty {win_al['qty']/k:.3f}{' (warm-up, detached)' if self.raw.align_detached else ''}")
+                        log.info("align step %d%s", self.step, al_str)
+                        metrics_kwargs.update(loss_align=win_al["align"] / k, loss_qty=win_al["qty"] / k,
+                                              align_cos=win_al["cos"] / k, align_top1=win_al["top1"] / k)
                     if win_acc_loss > 0:
                         metrics_kwargs["loss_accent"] = win_acc_loss / win_n
                         metrics_kwargs["accent_acc"] = win_acc_acc / win_n
@@ -259,6 +317,7 @@ class Trainer:
                                        peak_gpu_gib=gpu_gib, host_gib=host_gib, sys_gib=sys_gib, **metrics_kwargs)
                     win_loss, win_n, win_gn = 0.0, 0, 0.0
                     win_acc_loss, win_acc_acc = 0.0, 0.0
+                    win_al = dict.fromkeys(("align", "qty", "cos", "top1", "n"), 0.0)
                     _malloc_trim()
                 sys_gib = _sys_ram_gib()
                 if (self.max_host_gib and _host_ram_gib() > self.max_host_gib) or (sys_gib > 27.0):
@@ -317,9 +376,24 @@ class Trainer:
         host_gib = _host_ram_gib()
         log.info("VALID epoch %d step %d | WER %.4f CER %.4f | host %.1f GiB | %s",
                  self.epoch, self.step, wer, summary["cer"], host_gib, reg)
+        acc_fields = {}
+        if "align" in summary:
+            sa = summary["align"]
+            log.info("VALID align | cos %.4f top1 %.4f | qty err %.4f | %d words in %d utts", sa["cos"], sa["top1"],
+                     sa["qty_err"], sa["n_words"], sa["n_utts"])
+            acc_fields.update(align_cos=sa["cos"], align_top1=sa["top1"], align_qty_err=sa["qty_err"])
+        if "accent" in summary:
+            ac = summary["accent"]
+            log.info("VALID accent | acc %.4f macro-F1 %.4f | recall %s", ac["accuracy"], ac["macro_f1"],
+                     " ".join(f"{k}={v:.3f}" for k, v in ac["recall"].items()))
+            acc_fields = {"accent_acc": ac["accuracy"], "accent_macro_f1": ac["macro_f1"]}
+            w = self.raw.accent.layer_weights()
+            if w is not None:
+                log.info("accent layer weights (blocks 0..%d): %s", len(w) - 1, " ".join(f"{x:.3f}" for x in w.tolist()))
+                acc_fields["accent_layer_weights"] = [round(x, 4) for x in w.tolist()]
         self.metrics.write(kind="valid", step=self.step, epoch=self.epoch, wer=wer, cer=summary["cer"],
                            by_region={k: v["wer"] for k, v in summary["by_region"].items()},
-                           host_gib=host_gib)
+                           host_gib=host_gib, **acc_fields)
         if wer < self.best_wer:
             self.best_wer, self.best_step = wer, self.step
             if self.ctx.is_main:

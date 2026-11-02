@@ -1,0 +1,8 @@
+# E00 full fine-tune: nothing frozen. THIS is the baseline run that reached valid WER 11.44% / test WER 10.74%:
+# all other settings are the base.yaml defaults (frames 24000, accum_grad 2, lr_encoder 1e-4, warmup 500, 30 epochs).
+# (configs/exp/e00_full.yaml is a different recipe - lr 5e-5, warmup 1000, accum 3 - and was NOT used for that run.)
+exp_name: e00_full_ft
+encoder:
+  freeze_embed: false
+  freeze_layers: []
+  freeze_after_norm: false

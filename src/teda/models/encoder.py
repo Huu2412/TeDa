@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -122,8 +122,27 @@ class SpeechEncoder(nn.Module):
         super().__init__()
         self.net = net
         self.output_size = net.output_size()
+        self.num_blocks = len(net.encoders)
+        self._captured: List[torch.Tensor] = []
+        self._capture = False
+        self._hooks: List = []
+
+    def enable_layer_capture(self) -> None:
+        """Keep each conformer block's output of the latest forward pass (read with pop_layer_outputs).
+        Uses forward hooks, so the vendored ChunkFormer code is not modified; no extra copies are made
+        (these are the same tensors autograd already stores)."""
+        if self._hooks:
+            return
+        self._capture = True
+        for block in self.net.encoders:
+            self._hooks.append(block.register_forward_hook(lambda _m, _i, out: self._captured.append(out[0]) if self._capture else None))
+
+    def pop_layer_outputs(self) -> List[torch.Tensor]:
+        outs, self._captured = self._captured, []
+        return outs
 
     def forward(self, feats: torch.Tensor, feat_lens: torch.Tensor, chunk: Optional[Sequence[int]] = None):
+        self._captured = []
         if self.training or chunk is None:
             out, mask = self.net(feats, feat_lens)
         else:

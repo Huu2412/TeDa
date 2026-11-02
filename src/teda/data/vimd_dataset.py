@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import Dataset
 
 from teda.data import features as F
+from teda.data.align_cache import AlignCache
 from teda.data.groups import utt_groups
 from teda.data.label_maps import region_to_id
 from teda.data.tokenizer import BPETokenizer
@@ -38,8 +39,10 @@ class VimdDataset(Dataset):
         max_dur: Optional[float] = None,
         drop_infeasible_ctc: bool = False,
         limit: Optional[int] = None,
+        align_cache: Optional[AlignCache] = None,
     ):
         self.root = Path(data_dir)
+        self.align_cache = align_cache   # PhoBERT word vectors per utterance (E02/E03); None = not used
         self.split = split
         self.train = train
         self.feat_cfg = feat_cfg
@@ -73,6 +76,10 @@ class VimdDataset(Dataset):
             r["_dur"] = dur
             kept.append(r)
         self.rows = kept
+        if align_cache is not None:
+            missing = sum(1 for r in kept if r["utt_id"] not in align_cache)
+            if missing:
+                log.warning("[%s] %d/%d utterances have no PhoBERT cache entry: they train with CTC only", split, missing, len(kept))
         self._index = {r["utt_id"]: i for i, r in enumerate(kept)}
         # Dropping is ONLY ever applied to the train split; valid/test always keep every utterance.
         if train and (n_long or n_infeasible):
@@ -107,10 +114,14 @@ class VimdDataset(Dataset):
         sa = self.feat_cfg.get("spec_aug") or {}
         if self.train and sa.get("enabled", False):
             feats = F.spec_aug(feats, sa.get("num_t_mask", 2), sa.get("num_f_mask", 2), sa.get("max_t", 50), sa.get("max_f", 10))
-        return {
+        item = {
             "utt_id": r["utt_id"],
             "feats": feats,
             "tokens": torch.tensor(r["_tokens"], dtype=torch.long),
             "region_id": r["_region_id"],
             "text": r[self.text_field],
         }
+        if self.align_cache is not None:
+            got = self.align_cache.get(r["utt_id"])
+            item["word_vecs"] = got[1] if got is not None else torch.zeros(0, self.align_cache.dim, dtype=torch.float16)
+        return item
